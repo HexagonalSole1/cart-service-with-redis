@@ -1,0 +1,8 @@
+spring:
+  application:
+    name: shopping-cart-service
+  profiles:
+    active: dev
+
+  config:
+    import: configserver:http://34.239.38.109:8888
