@@ -3,6 +3,7 @@ package com.vallhalatech.shopping_cart.persistence.entities;
 import lombok.Data;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.redis.core.RedisHash;
+import org.springframework.data.redis.core.index.Indexed;
 
 import java.io.Serializable;
 import java.util.Date;
@@ -14,6 +15,7 @@ import java.util.Map;
 public class Cart implements Serializable {
     @Id
     private String id;
+    @Indexed // Esta anotación es crucial
     private String userId;
     private Map<String, CartItem> items = new HashMap<>();
     private Date createdAt;
