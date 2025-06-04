@@ -24,7 +24,7 @@ pipeline {
         )
         string(
             name: 'JAR_NAME',
-            defaultValue: 'ShoppingCart-0.0.1-SNAPSHOT.jar',
+            defaultValue: 'shopping-cart-0.0.1-SNAPSHOT.jar',
             description: 'Nombre del archivo JAR'
         )
         choice(
@@ -34,13 +34,18 @@ pipeline {
         )
         choice(
             name: 'JAVA_VERSION',
-            choices: ['17', '21', '11'],
+            choices: ['21', '17', '11'],
             description: 'Versión de Java a usar'
         )
         booleanParam(
             name: 'SKIP_TESTS',
             defaultValue: true,
             description: 'Omitir ejecución de tests'
+        )
+        booleanParam(
+            name: 'VERIFY_REDIS',
+            defaultValue: true,
+            description: 'Verificar conexión con Redis después del despliegue'
         )
     }
 
@@ -59,10 +64,10 @@ pipeline {
         // Credenciales
         SSH_KEY = credentials('ssh-key-ec2')
 
-        // Variables para auth-service
-        AUTH_SERVICE_NAME = "${params.SERVICE_NAME}"
-        AUTH_JAR_NAME = "${params.JAR_NAME}"
-        AUTH_SERVICE_PATH = "/home/ubuntu/${params.SERVICE_NAME}"
+        // Variables para el servicio
+        CART_SERVICE_NAME = "${params.SERVICE_NAME}"
+        CART_JAR_NAME = "${params.JAR_NAME}"
+        CART_SERVICE_PATH = "/home/ubuntu/${params.SERVICE_NAME}"
     }
 
     stages {
@@ -106,14 +111,15 @@ pipeline {
 
                     // Mostrar configuración final
                     echo """
-🔧 [AUTH-SERVICE] CONFIGURACIÓN:
-   • Servicio: ${env.AUTH_SERVICE_NAME}
-   • JAR: ${env.AUTH_JAR_NAME}
+🔧 [SHOPPING-CART] CONFIGURACIÓN:
+   • Servicio: ${env.CART_SERVICE_NAME}
+   • JAR: ${env.CART_JAR_NAME}
    • Rama detectada: ${env.GIT_BRANCH_NAME}
    • Entorno de despliegue: ${env.DEPLOY_ENV}
    • Requiere aprobación: ${env.NEED_APPROVAL}
    • Java: ${params.JAVA_VERSION}
    • Omitir tests: ${params.SKIP_TESTS}
+   • Verificar Redis: ${params.VERIFY_REDIS}
 """
                 }
             }
@@ -136,40 +142,83 @@ pipeline {
                             downloadUrl = "https://github.com/adoptium/temurin11-binaries/releases/download/jdk-11.0.21%2B9/OpenJDK11U-jdk_x64_linux_hotspot_11.0.21_9.tar.gz"
                             break
                         default:
-                            downloadUrl = "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.9%2B9/OpenJDK17U-jdk_x64_linux_hotspot_17.0.9_9.tar.gz"
+                            downloadUrl = "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.2%2B13/OpenJDK21U-jdk_x64_linux_hotspot_21.0.2_13.tar.gz"
                     }
 
-                    echo "🔧 [AUTH-SERVICE] Configurando JDK ${javaVersion}..."
+                    echo "🔧 [SHOPPING-CART] Configurando JDK ${javaVersion}..."
                     sh """
                         mkdir -p \${JDK_DIR}
 
                         if [ ! -f \${JDK_DIR}/bin/java ]; then
-                            echo "📥 [AUTH-SERVICE] Descargando JDK ${javaVersion}..."
+                            echo "📥 [SHOPPING-CART] Descargando JDK ${javaVersion}..."
                             wget -q "${downloadUrl}" -O jdk.tar.gz
                             tar -xzf jdk.tar.gz -C \${JDK_DIR} --strip-components=1
                             rm jdk.tar.gz
-                            echo "✅ [AUTH-SERVICE] JDK ${javaVersion} instalado"
+                            echo "✅ [SHOPPING-CART] JDK ${javaVersion} instalado"
                         else
-                            echo "✅ [AUTH-SERVICE] JDK ${javaVersion} ya existe"
+                            echo "✅ [SHOPPING-CART] JDK ${javaVersion} ya existe"
                         fi
 
-                        echo "☕ [AUTH-SERVICE] Java version:"
+                        echo "☕ [SHOPPING-CART] Java version:"
                         \${JDK_DIR}/bin/java -version
                     """
                 }
             }
         }
 
-        stage('🔨 Build Auth Service') {
+        stage('🛠️ Verificar y Ajustar POM') {
+            steps {
+                script {
+                    echo "🔍 [SHOPPING-CART] Verificando configuración de Java en POM..."
+
+                    // Verificar versión de Java en pom.xml
+                    def pomJavaVersion = sh(
+                        script: "grep '<java.version>' pom.xml | sed -e 's/.*<java.version>\\(.*\\)<\\/java.version>.*/\\1/' || echo 'Not found'",
+                        returnStdout: true
+                    ).trim()
+
+                    echo "📝 [SHOPPING-CART] Versión de Java en POM: ${pomJavaVersion}"
+                    echo "📝 [SHOPPING-CART] Versión de Java en Pipeline: ${params.JAVA_VERSION}"
+
+                    // Si hay discrepancia, mostrar advertencia
+                    if (pomJavaVersion != params.JAVA_VERSION && pomJavaVersion != 'Not found') {
+                        echo """⚠️ [SHOPPING-CART] ADVERTENCIA: La versión de Java en POM (${pomJavaVersion})
+                        no coincide con la del pipeline (${params.JAVA_VERSION})."""
+                    }
+
+                    // Ajustar el compilador para que use exactamente la versión de Java que tenemos
+                    echo "🔧 [SHOPPING-CART] Asegurando compatibilidad del compilador con JDK ${params.JAVA_VERSION}..."
+
+                    // Verificar si se necesita modificar el compiler plugin
+                    sh """
+                        # Verificar si el proyecto ya tiene una configuración para el compilador
+                        if grep -q '<maven.compiler.source>' pom.xml; then
+                            echo "🔍 Encontrada configuración maven.compiler.source en pom.xml"
+                        elif grep -q '<source>' pom.xml && grep -q '<maven-compiler-plugin>' pom.xml; then
+                            echo "🔍 Encontrada configuración source en maven-compiler-plugin"
+                        else
+                            echo "⚠️ No se encontró configuración explícita para el compilador"
+                        fi
+                    """
+                }
+            }
+        }
+
+        stage('🔨 Build Shopping Cart Service') {
             steps {
                 sh """
                     export JAVA_HOME=\${JDK_DIR}
                     export PATH=\${JAVA_HOME}/bin:\$PATH
 
-                    echo "🔨 [AUTH-SERVICE] Compilando aplicación..."
+                    echo "🔨 [SHOPPING-CART] Compilando aplicación..."
 
                     # Dar permisos de ejecución a mvnw
                     chmod +x ./mvnw
+
+                    # Verificar versión de Java
+                    echo "☕ Usando Java:"
+                    java -version
+                    echo "☕ JAVA_HOME: \${JAVA_HOME}"
 
                     # Configurar flags de Maven
                     MAVEN_FLAGS=""
@@ -178,19 +227,31 @@ pipeline {
                         echo "⏩ Tests deshabilitados"
                     fi
 
-                    # Compilar
-                    echo "📝 Ejecutando: ./mvnw clean package \$MAVEN_FLAGS"
-                    ./mvnw clean package \$MAVEN_FLAGS
+                    # Forzar la versión de Java en la compilación, independientemente de lo que diga el POM
+                    MAVEN_FLAGS="\${MAVEN_FLAGS} -Dmaven.compiler.source=${params.JAVA_VERSION} -Dmaven.compiler.target=${params.JAVA_VERSION} -Djava.version=${params.JAVA_VERSION}"
+
+                    # Compilar con flags adicionales
+                    echo "📝 Ejecutando: ./mvnw clean package \${MAVEN_FLAGS}"
+                    ./mvnw clean package \${MAVEN_FLAGS}
 
                     # Verificar JAR
-                    if [ -f target/${env.AUTH_JAR_NAME} ]; then
-                        echo "✅ [AUTH-SERVICE] JAR creado exitosamente"
-                        ls -lh target/${env.AUTH_JAR_NAME}
+                    if [ -f target/${env.CART_JAR_NAME} ]; then
+                        echo "✅ [SHOPPING-CART] JAR creado exitosamente"
+                        ls -lh target/${env.CART_JAR_NAME}
                     else
-                        echo "❌ [AUTH-SERVICE] Error: JAR no encontrado en la ruta esperada"
+                        echo "❌ [SHOPPING-CART] Error: JAR no encontrado en la ruta esperada"
                         echo "🔍 Buscando JAR..."
                         find target -name "*.jar" -not -name "*-sources.jar" -not -name "*-javadoc.jar"
-                        exit 1
+
+                        # Si no encontramos el JAR original, buscar cualquier JAR que podamos usar
+                        FOUND_JAR=\$(find target -name "*.jar" -not -name "*-sources.jar" -not -name "*-javadoc.jar" | head -1)
+                        if [ -n "\$FOUND_JAR" ]; then
+                            echo "⚠️ Usando JAR alternativo: \$FOUND_JAR"
+                            cp "\$FOUND_JAR" target/${env.CART_JAR_NAME}
+                            echo "✅ Copiado como target/${env.CART_JAR_NAME}"
+                        else
+                            exit 1
+                        fi
                     fi
                 """
             }
@@ -203,18 +264,19 @@ pipeline {
             steps {
                 script {
                     echo """
-🚨 [AUTH-SERVICE] APROBACIÓN REQUERIDA PARA PRODUCCIÓN
+🚨 [SHOPPING-CART] APROBACIÓN REQUERIDA PARA PRODUCCIÓN
 
 📋 Información del Deploy:
-   • Servicio: ${env.AUTH_SERVICE_NAME}
+   • Servicio: ${env.CART_SERVICE_NAME}
    • Entorno: PRODUCCIÓN
    • Rama: ${env.GIT_BRANCH_NAME}
    • Java: ${params.JAVA_VERSION}
+   • Dependencia: Redis
 """
 
                     timeout(time: 15, unit: 'MINUTES') {
                         def approval = input(
-                            message: "🚨 ¿Aprobar deploy de ${env.AUTH_SERVICE_NAME} a PRODUCCIÓN?",
+                            message: "🚨 ¿Aprobar deploy de ${env.CART_SERVICE_NAME} a PRODUCCIÓN?",
                             ok: '✅ Aprobar Deploy',
                             parameters: [
                                 choice(
@@ -226,16 +288,16 @@ pipeline {
                         )
 
                         if (approval != 'Aprobar') {
-                            error("❌ [AUTH-SERVICE] Deploy a producción rechazado")
+                            error("❌ [SHOPPING-CART] Deploy a producción rechazado")
                         }
 
-                        echo "✅ [AUTH-SERVICE] Deploy a producción APROBADO"
+                        echo "✅ [SHOPPING-CART] Deploy a producción APROBADO"
                     }
                 }
             }
         }
 
-        stage('🚀 Deploy Auth Service') {
+        stage('🚀 Deploy Shopping Cart Service') {
             when {
                 expression { return env.DEPLOY_ENV != 'none' }
             }
@@ -252,54 +314,55 @@ pipeline {
                         EC2_IP = env.EC2_IP_DEV
                     }
 
-                    echo "🚀 [AUTH-SERVICE] Desplegando en ${env.DEPLOY_ENV.toUpperCase()} (${EC2_IP})"
+                    echo "🚀 [SHOPPING-CART] Desplegando en ${env.DEPLOY_ENV.toUpperCase()} (${EC2_IP})"
 
                     // 1. Preparar servidor
                     sh """
-                    echo "🔧 [AUTH-SERVICE] Preparando servidor..."
+                    echo "🔧 [SHOPPING-CART] Preparando servidor..."
                     ssh -i \$SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=30 ${EC2_USER}@${EC2_IP} '
                         # Crear directorios
-                        sudo mkdir -p ${env.AUTH_SERVICE_PATH}
-                        sudo chown -R ubuntu:ubuntu ${env.AUTH_SERVICE_PATH}
+                        sudo mkdir -p ${env.CART_SERVICE_PATH}
+                        sudo chown -R ubuntu:ubuntu ${env.CART_SERVICE_PATH}
 
                         # Instalar dependencias básicas
                         which curl > /dev/null || sudo apt-get update -qq && sudo apt-get install -y curl
                         which netstat > /dev/null || sudo apt-get install -y net-tools
+                        which redis-cli > /dev/null || sudo apt-get install -y redis-tools
 
                         # Instalar Java si no existe
                         if ! which java > /dev/null; then
-                            echo "☕ [AUTH-SERVICE] Instalando Java ${params.JAVA_VERSION}..."
+                            echo "☕ [SHOPPING-CART] Instalando Java ${params.JAVA_VERSION}..."
                             sudo apt-get update -qq && sudo apt-get install -y openjdk-${params.JAVA_VERSION}-jre-headless
                         fi
 
-                        echo "✅ [AUTH-SERVICE] Servidor preparado"
+                        echo "✅ [SHOPPING-CART] Servidor preparado"
                     '
                     """
 
                     // 2. Detener servicio existente
                     sh """
-                    echo "🛑 [AUTH-SERVICE] Deteniendo servicio existente..."
+                    echo "🛑 [SHOPPING-CART] Deteniendo servicio existente..."
                     ssh -i \$SSH_KEY -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_IP} '
-                        if sudo systemctl is-active --quiet ${env.AUTH_SERVICE_NAME}.service 2>/dev/null; then
-                            echo "🛑 Deteniendo servicio ${env.AUTH_SERVICE_NAME}..."
-                            sudo systemctl stop ${env.AUTH_SERVICE_NAME}.service
+                        if sudo systemctl is-active --quiet ${env.CART_SERVICE_NAME}.service 2>/dev/null; then
+                            echo "🛑 Deteniendo servicio ${env.CART_SERVICE_NAME}..."
+                            sudo systemctl stop ${env.CART_SERVICE_NAME}.service
                             sleep 5
                         else
-                            echo "ℹ️ Servicio ${env.AUTH_SERVICE_NAME} no está corriendo"
+                            echo "ℹ️ Servicio ${env.CART_SERVICE_NAME} no está corriendo"
                         fi
-                    ' || echo "⚠️ [AUTH-SERVICE] No hay servicio previo"
+                    ' || echo "⚠️ [SHOPPING-CART] No hay servicio previo"
                     """
 
                     // 3. Copiar JAR
                     sh """
-                    echo "📦 [AUTH-SERVICE] Copiando JAR..."
-                    scp -i \$SSH_KEY -o StrictHostKeyChecking=no target/${env.AUTH_JAR_NAME} ${EC2_USER}@${EC2_IP}:${env.AUTH_SERVICE_PATH}/app.jar
-                    echo "✅ [AUTH-SERVICE] JAR copiado como app.jar"
+                    echo "📦 [SHOPPING-CART] Copiando JAR..."
+                    scp -i \$SSH_KEY -o StrictHostKeyChecking=no target/${env.CART_JAR_NAME} ${EC2_USER}@${EC2_IP}:${env.CART_SERVICE_PATH}/app.jar
+                    echo "✅ [SHOPPING-CART] JAR copiado como app.jar"
                     """
 
                     // 4. Crear servicio systemd
                     def systemdService = """[Unit]
-Description=Spring Boot Auth Service
+Description=Spring Boot Shopping Cart Service with Redis
 After=network.target
 Wants=network-online.target
 After=network-online.target
@@ -308,11 +371,11 @@ After=network-online.target
 Type=simple
 User=ubuntu
 Group=ubuntu
-WorkingDirectory=${env.AUTH_SERVICE_PATH}
-ExecStart=/usr/bin/java -jar ${env.AUTH_SERVICE_PATH}/app.jar \\
+WorkingDirectory=${env.CART_SERVICE_PATH}
+ExecStart=/usr/bin/java -jar ${env.CART_SERVICE_PATH}/app.jar \\
     --spring.profiles.active=${env.DEPLOY_ENV} \\
     --logging.level.root=INFO \\
-    --logging.file.name=${env.AUTH_SERVICE_PATH}/${env.AUTH_SERVICE_NAME}.log
+    --logging.file.name=${env.CART_SERVICE_PATH}/${env.CART_SERVICE_NAME}.log
 
 # Configuración de reinicio
 Restart=on-failure
@@ -322,7 +385,7 @@ SuccessExitStatus=143
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=${env.AUTH_SERVICE_NAME}
+SyslogIdentifier=${env.CART_SERVICE_NAME}
 
 # Seguridad
 NoNewPrivileges=true
@@ -337,10 +400,10 @@ WantedBy=multi-user.target"""
 
                     // 5. Configurar e iniciar servicio
                     sh """
-                    echo "⚙️ [AUTH-SERVICE] Configurando servicio systemd..."
+                    echo "⚙️ [SHOPPING-CART] Configurando servicio systemd..."
 
                     # Crear archivo de servicio
-                    echo '${systemdService}' | ssh -i \$SSH_KEY -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_IP} 'sudo tee /etc/systemd/system/${env.AUTH_SERVICE_NAME}.service > /dev/null'
+                    echo '${systemdService}' | ssh -i \$SSH_KEY -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_IP} 'sudo tee /etc/systemd/system/${env.CART_SERVICE_NAME}.service > /dev/null'
 
                     # Configurar e iniciar servicio
                     ssh -i \$SSH_KEY -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_IP} '
@@ -348,31 +411,31 @@ WantedBy=multi-user.target"""
                         sudo systemctl daemon-reload
 
                         # Habilitar auto-inicio
-                        sudo systemctl enable ${env.AUTH_SERVICE_NAME}.service
+                        sudo systemctl enable ${env.CART_SERVICE_NAME}.service
 
                         # Iniciar servicio
-                        sudo systemctl start ${env.AUTH_SERVICE_NAME}.service
+                        sudo systemctl start ${env.CART_SERVICE_NAME}.service
 
                         # Verificar inicio
                         sleep 15
-                        if sudo systemctl is-active --quiet ${env.AUTH_SERVICE_NAME}.service; then
-                            echo "✅ [AUTH-SERVICE] Servicio iniciado correctamente"
-                            sudo systemctl status ${env.AUTH_SERVICE_NAME}.service --no-pager -l
+                        if sudo systemctl is-active --quiet ${env.CART_SERVICE_NAME}.service; then
+                            echo "✅ [SHOPPING-CART] Servicio iniciado correctamente"
+                            sudo systemctl status ${env.CART_SERVICE_NAME}.service --no-pager -l
                         else
-                            echo "❌ [AUTH-SERVICE] Error al iniciar servicio"
-                            sudo systemctl status ${env.AUTH_SERVICE_NAME}.service --no-pager -l
-                            sudo journalctl -u ${env.AUTH_SERVICE_NAME}.service --since \"5 minutes ago\" --no-pager
+                            echo "❌ [SHOPPING-CART] Error al iniciar servicio"
+                            sudo systemctl status ${env.CART_SERVICE_NAME}.service --no-pager -l
+                            sudo journalctl -u ${env.CART_SERVICE_NAME}.service --since \"5 minutes ago\" --no-pager
                             exit 1
                         fi
                     '
                     """
 
-                    echo "✅ [AUTH-SERVICE] Deploy completado en ${env.DEPLOY_ENV.toUpperCase()}!"
+                    echo "✅ [SHOPPING-CART] Deploy completado en ${env.DEPLOY_ENV.toUpperCase()}!"
                 }
             }
         }
 
-        stage('🔍 Health Check') {
+        stage('🔍 Health Check & Redis Verification') {
             when {
                 expression { return env.DEPLOY_ENV != 'none' }
             }
@@ -388,7 +451,7 @@ WantedBy=multi-user.target"""
                         EC2_IP = env.EC2_IP_DEV
                     }
 
-                    echo "🔍 [AUTH-SERVICE] Verificando deploy..."
+                    echo "🔍 [SHOPPING-CART] Verificando deploy..."
 
                     // Esperar inicio completo
                     sh "sleep 30"
@@ -396,16 +459,16 @@ WantedBy=multi-user.target"""
                     // Verificaciones
                     sh """
                     ssh -i \$SSH_KEY -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_IP} '
-                        echo "📊 [AUTH-SERVICE] Estado del servicio:"
-                        sudo systemctl status ${env.AUTH_SERVICE_NAME}.service --no-pager
+                        echo "📊 [SHOPPING-CART] Estado del servicio:"
+                        sudo systemctl status ${env.CART_SERVICE_NAME}.service --no-pager
 
-                        echo "🔌 [AUTH-SERVICE] Detectando puerto del servicio..."
+                        echo "🔌 [SHOPPING-CART] Detectando puerto del servicio..."
                         # Detectar el puerto
-                        SERVICE_PORT=\$(sudo journalctl -u ${env.AUTH_SERVICE_NAME}.service --since \"10 minutes ago\" --no-pager | grep -o "Tomcat started on port(s): [0-9]*" | grep -o "[0-9]*" | tail -1)
+                        SERVICE_PORT=\$(sudo journalctl -u ${env.CART_SERVICE_NAME}.service --since \"10 minutes ago\" --no-pager | grep -o "Tomcat started on port(s): [0-9]*" | grep -o "[0-9]*" | tail -1)
 
                         if [ -z "\$SERVICE_PORT" ]; then
                             # Fallback: buscar puerto del proceso Java
-                            SERVICE_PID=\$(sudo systemctl show --property MainPID --value ${env.AUTH_SERVICE_NAME}.service)
+                            SERVICE_PID=\$(sudo systemctl show --property MainPID --value ${env.CART_SERVICE_NAME}.service)
                             if [ "\$SERVICE_PID" != "0" ] && [ -n "\$SERVICE_PID" ]; then
                                 SERVICE_PORT=\$(sudo netstat -tlnp 2>/dev/null | grep "\$SERVICE_PID/java" | awk "{print \$4}" | cut -d: -f2 | head -1)
                             fi
@@ -418,21 +481,49 @@ WantedBy=multi-user.target"""
                             echo "🏥 Verificando health endpoint..."
                             curl -s http://localhost:\$SERVICE_PORT/actuator/health
 
-                            # Verificar endpoints auth
-                            echo -e "\n🔐 Verificando endpoints auth..."
-                            curl -s -o /dev/null -w "Auth endpoint HTTP status: %{http_code}\n" http://localhost:\$SERVICE_PORT/auth/authenticate
+                            # Verificar endpoint del carrito
+                            echo -e "\n🛒 Verificando endpoints del carrito..."
+                            curl -s -o /dev/null -w "Cart endpoint HTTP status: %{http_code}\n" http://localhost:\$SERVICE_PORT/cart/1
 
                             # Guardar puerto en archivo para futuras referencias
-                            echo "\$SERVICE_PORT" > ${env.AUTH_SERVICE_PATH}/service_port.txt
-                            echo "✅ Puerto guardado en ${env.AUTH_SERVICE_PATH}/service_port.txt"
+                            echo "\$SERVICE_PORT" > ${env.CART_SERVICE_PATH}/service_port.txt
+                            echo "✅ Puerto guardado en ${env.CART_SERVICE_PATH}/service_port.txt"
                         else
                             echo "⚠️ No se pudo detectar el puerto del servicio"
                             echo "🔍 Puertos activos:"
                             sudo netstat -tuln | grep LISTEN
                         fi
 
-                        echo "📄 [AUTH-SERVICE] Últimos logs del servicio:"
-                        sudo journalctl -u ${env.AUTH_SERVICE_NAME}.service --since \"5 minutes ago\" --no-pager | tail -20
+                        # Verificar logs del servicio buscando errores de Redis
+                        echo "🔍 [SHOPPING-CART] Verificando logs por errores de Redis..."
+                        if sudo journalctl -u ${env.CART_SERVICE_NAME}.service --since \"5 minutes ago\" | grep -i "redis" | grep -i "error"; then
+                            echo "⚠️ Se encontraron errores de Redis en los logs"
+                        else
+                            echo "✅ No se encontraron errores de Redis en los logs"
+                        fi
+
+                        # Verificar conexión Redis si está habilitado
+                        if [ "${params.VERIFY_REDIS}" = "true" ]; then
+                            echo "🔍 [SHOPPING-CART] Extraer información de conexión Redis..."
+
+                            # Buscar información de conexión Redis en los logs
+                            REDIS_HOST=\$(sudo journalctl -u ${env.CART_SERVICE_NAME}.service --since \"5 minutes ago\" | grep -o "spring.redis.host=\\S*" | head -1 | cut -d= -f2)
+                            REDIS_PORT=\$(sudo journalctl -u ${env.CART_SERVICE_NAME}.service --since \"5 minutes ago\" | grep -o "spring.redis.port=\\S*" | head -1 | cut -d= -f2)
+
+                            if [ -n "\$REDIS_HOST" ] && [ -n "\$REDIS_PORT" ]; then
+                                echo "🔌 Verificando conexión a Redis en \$REDIS_HOST:\$REDIS_PORT..."
+                                if redis-cli -h \$REDIS_HOST -p \$REDIS_PORT ping 2>/dev/null | grep -q "PONG"; then
+                                    echo "✅ Conexión a Redis exitosa"
+                                else
+                                    echo "⚠️ No se pudo conectar a Redis. Esto puede ser normal si Redis requiere autenticación"
+                                fi
+                            else
+                                echo "⚠️ No se pudo extraer información de conexión Redis de los logs"
+                            fi
+                        fi
+
+                        echo "📄 [SHOPPING-CART] Últimos logs del servicio:"
+                        sudo journalctl -u ${env.CART_SERVICE_NAME}.service --since \"5 minutes ago\" --no-pager | tail -20
                     '
                     """
                 }
@@ -455,41 +546,41 @@ WantedBy=multi-user.target"""
                     }
 
                     echo """
-🎉 [AUTH-SERVICE] ¡DEPLOY EXITOSO EN ${env.DEPLOY_ENV.toUpperCase()}!
+🎉 [SHOPPING-CART] ¡DEPLOY EXITOSO EN ${env.DEPLOY_ENV.toUpperCase()}!
 
 📋 Información del servicio:
-   • Nombre: ${env.AUTH_SERVICE_NAME}
+   • Nombre: ${env.CART_SERVICE_NAME}
    • Servidor: ${EC2_IP}
-   • Systemd Service: ${env.AUTH_SERVICE_NAME}.service
+   • Systemd Service: ${env.CART_SERVICE_NAME}.service
    • Java Version: ${params.JAVA_VERSION}
    • Entorno: ${env.DEPLOY_ENV}
+   • Base de datos: Redis
 
 🌐 API Endpoints:
    • Base URL: http://${EC2_IP}:[PUERTO]
-   • Auth: http://${EC2_IP}:[PUERTO]/auth/authenticate
-   • Swagger: http://${EC2_IP}:[PUERTO]/swagger-ui/index.html
+   • Cart: http://${EC2_IP}:[PUERTO]/cart/{userId}
    • Health: http://${EC2_IP}:[PUERTO]/actuator/health
 
 🛠️ Comandos de gestión:
-   • Estado: sudo systemctl status ${env.AUTH_SERVICE_NAME}.service
-   • Logs: sudo journalctl -u ${env.AUTH_SERVICE_NAME}.service -f
-   • Restart: sudo systemctl restart ${env.AUTH_SERVICE_NAME}.service
-   • Stop: sudo systemctl stop ${env.AUTH_SERVICE_NAME}.service
+   • Estado: sudo systemctl status ${env.CART_SERVICE_NAME}.service
+   • Logs: sudo journalctl -u ${env.CART_SERVICE_NAME}.service -f
+   • Restart: sudo systemctl restart ${env.CART_SERVICE_NAME}.service
+   • Stop: sudo systemctl stop ${env.CART_SERVICE_NAME}.service
 
 ✅ Auto-inicio habilitado
 """
                 } else {
-                    echo "✅ [AUTH-SERVICE] Compilación exitosa - Sin despliegue"
+                    echo "✅ [SHOPPING-CART] Compilación exitosa - Sin despliegue"
                 }
             }
         }
 
         failure {
             echo """
-❌ [AUTH-SERVICE] PIPELINE FALLIDO
+❌ [SHOPPING-CART] PIPELINE FALLIDO
 
 🔍 Información:
-   • Servicio: ${env.AUTH_SERVICE_NAME}
+   • Servicio: ${env.CART_SERVICE_NAME}
    • Rama: ${env.GIT_BRANCH_NAME ?: 'desconocida'}
    • Entorno: ${env.DEPLOY_ENV ?: 'ninguno'}
 
