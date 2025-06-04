@@ -10,7 +10,7 @@ import org.springframework.data.redis.repository.configuration.EnableRedisReposi
 @EnableFeignClients
 @EnableDiscoveryClient
 @SpringBootApplication
-@EnableRedisRepositories // Añadir esta anotación si no está presente
+@EnableRedisRepositories
 public class ShoppingCartApplication {
 
 	public static void main(String[] args) {
@@ -18,3 +18,4 @@ public class ShoppingCartApplication {
 	}
 
 }
+//deploy
